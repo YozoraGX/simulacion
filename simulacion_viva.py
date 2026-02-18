@@ -8,7 +8,7 @@ import random
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 
 NOMBRES = [
@@ -87,8 +87,7 @@ class SimulacionViva:
         self._sembrar_relaciones_iniciales()
 
     def _generar_lugares(self) -> List[str]:
-        lugares = self.rng.sample(LUGARES_BASE, k=min(len(LUGARES_BASE), 6))
-        return lugares
+        return self.rng.sample(LUGARES_BASE, k=min(len(LUGARES_BASE), 6))
 
     def _generar_facciones(self) -> List[Faccion]:
         doctrinas = ["pragmatismo técnico", "solidaridad comunal", "expansión estratégica", "conservación del saber"]
@@ -125,12 +124,7 @@ class SimulacionViva:
         recursos = [f.recurso_clave for f in self.facciones]
         eventos = []
         for plantilla in plantillas:
-            eventos.append(
-                plantilla.format(
-                    recurso=self.rng.choice(recursos),
-                    lugar=self.rng.choice(self.lugares),
-                )
-            )
+            eventos.append(plantilla.format(recurso=self.rng.choice(recursos), lugar=self.rng.choice(self.lugares)))
         return eventos
 
     def _crear_npcs(self, cantidad: int) -> List[NPC]:
@@ -167,54 +161,70 @@ class SimulacionViva:
                         mem_a.friccion = abs(base)
                         mem_b.friccion = abs(base) * 0.9
 
-    def _evento_global(self) -> Optional[str]:
+    def _evento_global(self) -> Optional[List[str]]:
         if self.rng.random() > 0.4:
             return None
 
         evento = self.rng.choice(self.eventos_mundo)
         impacto = self.rng.uniform(-0.2, 0.2)
+        detalle = [f"Evento global: {evento}."]
+        detalle.append(f"Impacto sistémico: {'positivo' if impacto >= 0 else 'negativo'} ({impacto:+.3f}).")
+
+        cambios = []
         for npc in self.npcs:
+            energia_antes = npc.energia
+            humor_antes = npc.humor
             sensibilidad = 0.5 + npc.ambicion * 0.2 - npc.prudencia * 0.1
             npc.humor = _clamp(npc.humor + impacto * sensibilidad, -1.0, 1.0)
             npc.energia = _clamp(npc.energia - abs(impacto) * (0.25 + npc.ambicion * 0.1), 0.0, 1.0)
-        return evento
+            cambios.append((abs((npc.humor - humor_antes)) + abs((npc.energia - energia_antes)), npc, energia_antes, humor_antes))
 
-    def _elegir_accion(self, actor: NPC, objetivo: NPC) -> str:
+        cambios.sort(key=lambda x: x[0], reverse=True)
+        detalle.append("Más afectados por el evento:")
+        for _, npc, e0, h0 in cambios[:3]:
+            detalle.append(
+                f"  - {npc.nombre}: energía {e0:.2f}->{npc.energia:.2f} ({npc.energia-e0:+.2f}), "
+                f"humor {h0:.2f}->{npc.humor:.2f} ({npc.humor-h0:+.2f})"
+            )
+        return detalle
+
+    def _puntajes_accion(self, actor: NPC, objetivo: NPC) -> Dict[str, float]:
         memoria = actor.memoria_de(objetivo.nombre)
-
-        tendencias = {
+        return {
             "cooperar": (
-                actor.empatia * 0.55
-                + memoria.confianza * 0.8
-                - memoria.friccion * 0.5
-                + actor.experiencia["cooperar"] * 0.25
-                + self.rng.uniform(-0.2, 0.2)
+                actor.empatia * 0.55 + memoria.confianza * 0.8 - memoria.friccion * 0.5
+                + actor.experiencia["cooperar"] * 0.25 + self.rng.uniform(-0.2, 0.2)
             ),
             "competir": (
-                actor.ambicion * 0.6
-                + memoria.friccion * 0.8
-                + actor.experiencia["competir"] * 0.25
-                + self.rng.uniform(-0.2, 0.2)
+                actor.ambicion * 0.6 + memoria.friccion * 0.8
+                + actor.experiencia["competir"] * 0.25 + self.rng.uniform(-0.2, 0.2)
             ),
             "explorar": (
-                actor.curiosidad * 0.75
-                + (1 - actor.prudencia) * 0.2
-                + actor.experiencia["explorar"] * 0.25
-                + self.rng.uniform(-0.2, 0.2)
+                actor.curiosidad * 0.75 + (1 - actor.prudencia) * 0.2
+                + actor.experiencia["explorar"] * 0.25 + self.rng.uniform(-0.2, 0.2)
             ),
             "negociar": (
-                actor.prudencia * 0.45
-                + actor.empatia * 0.25
-                + actor.experiencia["negociar"] * 0.3
-                + (0.1 if actor.faccion != objetivo.faccion else -0.05)
-                + self.rng.uniform(-0.2, 0.2)
+                actor.prudencia * 0.45 + actor.empatia * 0.25 + actor.experiencia["negociar"] * 0.3
+                + (0.1 if actor.faccion != objetivo.faccion else -0.05) + self.rng.uniform(-0.2, 0.2)
             ),
         }
-        return max(tendencias, key=tendencias.get)
 
-    def _resolver_accion(self, actor: NPC, objetivo: NPC, accion: str) -> str:
+    def _elegir_accion(self, actor: NPC, objetivo: NPC) -> tuple[str, List[str]]:
+        puntajes = self._puntajes_accion(actor, objetivo)
+        accion = max(puntajes, key=puntajes.get)
+        orden = sorted(puntajes.items(), key=lambda x: x[1], reverse=True)
+        detalle = ["Detalle de decisión IA:"]
+        for nombre, valor in orden:
+            pref = "*" if nombre == accion else "-"
+            detalle.append(f"  {pref} {nombre}: {valor:.3f}")
+        return accion, detalle
+
+    def _resolver_accion(self, actor: NPC, objetivo: NPC, accion: str) -> List[str]:
         memoria_actor = actor.memoria_de(objetivo.nombre)
         memoria_objetivo = objetivo.memoria_de(actor.nombre)
+        e_a0, h_a0 = actor.energia, actor.humor
+        e_o0, h_o0 = objetivo.energia, objetivo.humor
+        c0, f0, d0 = memoria_actor.confianza, memoria_actor.friccion, memoria_actor.deuda
 
         if accion == "cooperar":
             exito = self.rng.random() < (0.5 + actor.empatia * 0.25 + actor.energia * 0.2)
@@ -226,7 +236,7 @@ class SimulacionViva:
                 objetivo.humor = _clamp(objetivo.humor + 0.05, -1.0, 1.0)
                 actor.energia = _clamp(actor.energia - 0.04, 0.0, 1.0)
                 actor.experiencia["cooperar"] += 0.08
-                evento = f"{actor.nombre} colaboró con {objetivo.nombre}; la confianza entre ambos subió."
+                evento = f"{actor.nombre} colaboró con {objetivo.nombre}; la alianza se fortaleció."
             else:
                 memoria_actor.friccion = _clamp(memoria_actor.friccion + 0.08, 0.0, 1.0)
                 actor.humor = _clamp(actor.humor - 0.07, -1.0, 1.0)
@@ -268,7 +278,7 @@ class SimulacionViva:
                 actor.experiencia["explorar"] += 0.04
                 evento = f"{actor.nombre} regresó de explorar sin resultados y con daños menores."
 
-        else:  # negociar
+        else:
             base = 0.45 + actor.prudencia * 0.2 + actor.empatia * 0.2 - memoria_actor.friccion * 0.2
             if actor.faccion != objetivo.faccion:
                 base += 0.08
@@ -289,32 +299,44 @@ class SimulacionViva:
         memoria_actor.eventos.append(evento)
         if len(memoria_actor.eventos) > 20:
             memoria_actor.eventos = memoria_actor.eventos[-20:]
-        return evento
 
-    def _actualizar_objetivos(self) -> None:
+        return [
+            evento,
+            "Consecuencias inmediatas:",
+            f"  - {actor.nombre}: energía {e_a0:.2f}->{actor.energia:.2f} ({actor.energia-e_a0:+.2f}), humor {h_a0:.2f}->{actor.humor:.2f} ({actor.humor-h_a0:+.2f})",
+            f"  - {objetivo.nombre}: energía {e_o0:.2f}->{objetivo.energia:.2f} ({objetivo.energia-e_o0:+.2f}), humor {h_o0:.2f}->{objetivo.humor:.2f} ({objetivo.humor-h_o0:+.2f})",
+            (
+                f"  - Memoria de {actor.nombre} sobre {objetivo.nombre}: "
+                f"confianza {c0:.2f}->{memoria_actor.confianza:.2f}, "
+                f"fricción {f0:.2f}->{memoria_actor.friccion:.2f}, deuda {d0:.2f}->{memoria_actor.deuda:.2f}"
+            ),
+        ]
+
+    def _actualizar_objetivos(self) -> List[str]:
+        cambios: List[str] = []
         for npc in self.npcs:
+            anterior = npc.objetivo
             if npc.experiencia["explorar"] > 0.35 and self.rng.random() < 0.15:
                 npc.objetivo = "cartografiar rutas seguras"
             elif npc.experiencia["cooperar"] > 0.35 and self.rng.random() < 0.15:
                 npc.objetivo = "consolidar alianzas estables"
             elif npc.experiencia["competir"] > 0.35 and self.rng.random() < 0.15:
                 npc.objetivo = "asegurar ventaja táctica"
+            if anterior != npc.objetivo:
+                cambios.append(f"  - {npc.nombre}: '{anterior}' -> '{npc.objetivo}'")
+        return cambios
 
     def _resumen_facciones(self) -> str:
         lineas = ["Facciones activas:"]
         for fac in self.facciones:
-            lineas.append(
-                f"  - {fac.nombre}: doctrina={fac.doctrina}, recurso={fac.recurso_clave}, cohesión={fac.cohesion:.2f}"
-            )
+            lineas.append(f"  - {fac.nombre}: doctrina={fac.doctrina}, recurso={fac.recurso_clave}, cohesión={fac.cohesion:.2f}")
         return "\n".join(lineas)
 
     def _resumen_estado(self) -> str:
         lineas = [f"Estado de {self.lugar_actual}:"]
         for npc in sorted(self.npcs, key=lambda n: n.nombre):
             lineas.append(
-                "  - "
-                f"{npc.nombre} ({npc.rol}, {npc.faccion}): energía={npc.energia:.2f}, humor={npc.humor:.2f}, "
-                f"objetivo={npc.objetivo}"
+                f"  - {npc.nombre} ({npc.rol}, {npc.faccion}): energía={npc.energia:.2f}, humor={npc.humor:.2f}, objetivo={npc.objetivo}"
             )
         return "\n".join(lineas)
 
@@ -328,19 +350,34 @@ class SimulacionViva:
 
         evento_global = self._evento_global()
         if evento_global:
-            salida.append(f"Evento global: {evento_global}.")
+            salida.extend(evento_global)
 
         actor, objetivo = self.rng.sample(self.npcs, 2)
-        accion = self._elegir_accion(actor, objetivo)
-        evento_local = self._resolver_accion(actor, objetivo, accion)
-        salida.append(f"Acción elegida: {accion}.")
-        salida.append(evento_local)
+        salida.append(
+            f"Interacción principal: {actor.nombre} ({actor.faccion}) con {objetivo.nombre} ({objetivo.faccion})."
+        )
+        salida.append(
+            f"Contexto previo: confianza={actor.memoria_de(objetivo.nombre).confianza:.2f}, "
+            f"fricción={actor.memoria_de(objetivo.nombre).friccion:.2f}, deuda={actor.memoria_de(objetivo.nombre).deuda:.2f}."
+        )
 
+        accion, detalle_decision = self._elegir_accion(actor, objetivo)
+        salida.extend(detalle_decision)
+        salida.append(f"Acción elegida: {accion}.")
+        salida.extend(self._resolver_accion(actor, objetivo, accion))
+
+        salida.append("Recuperación pasiva de energía del grupo:")
         for npc in self.npcs:
+            e0 = npc.energia
             recuperacion = 0.012 + npc.prudencia * 0.015
             npc.energia = _clamp(npc.energia + recuperacion, 0.0, 1.0)
+            salida.append(f"  - {npc.nombre}: {e0:.2f}->{npc.energia:.2f} ({npc.energia-e0:+.2f})")
 
-        self._actualizar_objetivos()
+        cambios_obj = self._actualizar_objetivos()
+        if cambios_obj:
+            salida.append("Cambios de objetivo por aprendizaje:")
+            salida.extend(cambios_obj)
+
         salida.append(self._resumen_estado())
         self.cronica.extend(salida)
         return salida
@@ -356,7 +393,7 @@ def ejecutar_simulacion(ticks: int, pausa: float, semilla: int, num_npcs: int) -
     print("=== Simulación viva compleja iniciada ===")
     print(f"Semilla activa: {semilla}")
     print(sim._resumen_facciones())
-    print("\nLos NPCs decidirán en cada ciclo y aprenderán de sus relaciones.\n")
+    print("\nNarrativa detallada activada: se muestran causas, puntajes y consecuencias en cada ciclo.\n")
 
     for _ in range(ticks):
         for linea in sim.paso():
@@ -369,7 +406,7 @@ def ejecutar_simulacion(ticks: int, pausa: float, semilla: int, num_npcs: int) -
 
 def _parse_args(argv: List[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Simulación narrativa en vivo con mundo reproducible por semilla y NPCs adaptativos."
+        description="Simulación narrativa en vivo con mundo reproducible por semilla y trazas detalladas de eventos."
     )
     parser.add_argument("--ticks", type=int, default=25, help="Cantidad de ciclos narrativos a ejecutar.")
     parser.add_argument("--pausa", type=float, default=0.6, help="Segundos de espera entre ciclos.")
