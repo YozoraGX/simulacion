@@ -4,9 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import json
 import random
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -49,6 +52,7 @@ class NPC:
     humor: float = 0.0
     recuerdos: Dict[str, MemoriaSocial] = field(default_factory=dict)
     experiencia: Dict[str, float] = field(default_factory=lambda: {"cooperar": 0.0, "competir": 0.0, "explorar": 0.0})
+    rutina_base: str = ""
 
     def memoria_de(self, otro: str) -> MemoriaSocial:
         if otro not in self.recuerdos:
@@ -57,11 +61,16 @@ class NPC:
 
 
 class SimulacionViva:
-    def __init__(self, semilla: Optional[int], num_npcs: int = 6):
+    def __init__(self, semilla: Optional[int], num_npcs: int = 6, usar_ia: bool = False,
+                 lm_studio_url: str = "http://127.0.0.1:1234/v1/chat/completions", modelo: str = "local-model"):
         self.rng = random.Random(semilla)
         self.tick = 0
         self.lugar_actual = self.rng.choice(LUGARES)
         self.cronica: List[str] = []
+        self.usar_ia = usar_ia
+        self.lm_studio_url = lm_studio_url
+        self.modelo = modelo
+        self.fase_del_dia = "amanecer"
         self.npcs = self._crear_npcs(num_npcs)
 
     def _crear_npcs(self, cantidad: int) -> List[NPC]:
@@ -83,9 +92,52 @@ class SimulacionViva:
                         "probar una teoría arriesgada",
                         "conectar a facciones rivales",
                     ]),
+                    rutina_base=self.rng.choice([
+                        "trabajar en el taller por la mañana y socializar al atardecer",
+                        "vigilar el barrio de madrugada y descansar al mediodía",
+                        "comerciar durante el día y estudiar mapas por la noche",
+                        "recolectar recursos temprano y cocinar para su familia al anochecer",
+                    ]),
                 )
             )
         return npcs
+
+    def _actualizar_fase(self) -> None:
+        fases = ["amanecer", "mañana", "tarde", "anochecer", "noche"]
+        self.fase_del_dia = fases[(self.tick - 1) % len(fases)]
+
+    def _accion_ia(self, actor: NPC, objetivo: NPC) -> Optional[str]:
+        prompt = (
+            "Devuelve solo una palabra entre: cooperar, competir, explorar. "
+            f"Fase: {self.fase_del_dia}. "
+            f"Actor: {actor.nombre}, rol={actor.rol}, rutina={actor.rutina_base}, "
+            f"energía={actor.energia:.2f}, humor={actor.humor:.2f}. "
+            f"Objetivo: {objetivo.nombre}, rol={objetivo.rol}."
+        )
+        payload = {
+            "model": self.modelo,
+            "messages": [
+                {"role": "system", "content": "Eres un motor de decisiones para simulación."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 1.0,
+            "max_tokens": 8,
+        }
+        req = urllib.request.Request(
+            self.lm_studio_url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=2.5) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            contenido = data["choices"][0]["message"]["content"].strip().lower()
+            for opcion in ("cooperar", "competir", "explorar"):
+                if opcion in contenido:
+                    return opcion
+        except (urllib.error.URLError, TimeoutError, KeyError, IndexError, json.JSONDecodeError):
+            return None
+        return None
 
     def _evento_global(self) -> Optional[str]:
         prob = 0.35
@@ -100,6 +152,11 @@ class SimulacionViva:
         return None
 
     def _elegir_accion(self, actor: NPC, objetivo: NPC) -> str:
+        if self.usar_ia:
+            accion_ia = self._accion_ia(actor, objetivo)
+            if accion_ia:
+                return accion_ia
+
         memoria = actor.memoria_de(objetivo.nombre)
 
         tendencia_cooperar = (
@@ -206,7 +263,9 @@ class SimulacionViva:
 
     def paso(self) -> List[str]:
         self.tick += 1
+        self._actualizar_fase()
         salida = [f"\n--- Ciclo {self.tick} en {self.lugar_actual} ---"]
+        salida.append(f"Fase del día: {self.fase_del_dia}.")
 
         if self.rng.random() < 0.20:
             self.lugar_actual = self.rng.choice(LUGARES)
@@ -234,8 +293,16 @@ def _clamp(valor: float, minimo: float, maximo: float) -> float:
     return max(min(valor, maximo), minimo)
 
 
-def ejecutar_simulacion(ticks: int, pausa: float, semilla: Optional[int], num_npcs: int) -> None:
-    sim = SimulacionViva(semilla=semilla, num_npcs=num_npcs)
+def ejecutar_simulacion(ticks: int, pausa: float, semilla: Optional[int], num_npcs: int,
+                       usar_ia: bool = False, lm_studio_url: str = "http://127.0.0.1:1234/v1/chat/completions",
+                       modelo: str = "local-model") -> None:
+    sim = SimulacionViva(
+        semilla=semilla,
+        num_npcs=num_npcs,
+        usar_ia=usar_ia,
+        lm_studio_url=lm_studio_url,
+        modelo=modelo,
+    )
 
     print("=== Simulación viva iniciada ===")
     print("Los NPCs tomarán decisiones autónomas y aprenderán de sus interacciones.\n")
@@ -257,6 +324,14 @@ def _parse_args(argv: List[str]) -> argparse.Namespace:
     parser.add_argument("--pausa", type=float, default=0.8, help="Segundos de espera entre ciclos.")
     parser.add_argument("--semilla", type=int, default=None, help="Semilla para reproducibilidad.")
     parser.add_argument("--npcs", type=int, default=6, help="Cantidad de NPCs en la simulación (máx 10).")
+    parser.add_argument("--usar-ia", action="store_true", help="Usa LM Studio para elegir acciones de cada NPC.")
+    parser.add_argument(
+        "--lm-studio-url",
+        type=str,
+        default="http://127.0.0.1:1234/v1/chat/completions",
+        help="Endpoint OpenAI-compatible de LM Studio.",
+    )
+    parser.add_argument("--modelo", type=str, default="local-model", help="Nombre del modelo cargado en LM Studio.")
     return parser.parse_args(argv)
 
 
@@ -266,7 +341,15 @@ def main(argv: List[str]) -> int:
     ticks = max(1, args.ticks)
     pausa = max(0.0, args.pausa)
 
-    ejecutar_simulacion(ticks=ticks, pausa=pausa, semilla=args.semilla, num_npcs=npcs)
+    ejecutar_simulacion(
+        ticks=ticks,
+        pausa=pausa,
+        semilla=args.semilla,
+        num_npcs=npcs,
+        usar_ia=args.usar_ia,
+        lm_studio_url=args.lm_studio_url,
+        modelo=args.modelo,
+    )
     return 0
 
 
